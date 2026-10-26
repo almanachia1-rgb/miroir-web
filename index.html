@@ -1,0 +1,111 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Test Miroir Tesla</title>
+<style>
+  :root { --bg:#0b0d10; --card:#16191e; --txt:#e8eaed; --muted:#8b929c; --ok:#22c55e; --bad:#ef4444; --warn:#f59e0b; }
+  body { margin:0; background:var(--bg); color:var(--txt); font:18px system-ui, sans-serif; }
+  main { max-width:900px; margin:0 auto; padding:24px 16px; }
+  h1 { font-size:26px; margin:0 0 6px; }
+  p { color:var(--muted); margin:6px 0 18px; }
+  .row { display:flex; gap:14px; flex-wrap:wrap; margin:18px 0; }
+  button { flex:1; min-width:220px; padding:22px; font-size:20px; font-weight:700; border:0; border-radius:16px;
+           background:#2563eb; color:#fff; }
+  button.alt { background:#374151; }
+  #status { font-size:28px; font-weight:800; margin:18px 0 8px; }
+  #big { font-size:22px; margin:8px 0; }
+  pre { background:var(--card); padding:14px; border-radius:12px; white-space:pre-wrap; font-size:14px; max-height:45vh; overflow:auto; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Test de connexion Miroir Tesla</h1>
+  <p>Ouvrez cette page sur le téléphone ET dans la Tesla (même partage de connexion). Appuyez sur le bon bouton de chaque côté.</p>
+  <div class="row">
+    <button id="bPhone">📱 Je suis le TÉLÉPHONE</button>
+    <button id="bCar" class="alt">🚗 Je suis la TESLA</button>
+  </div>
+  <div id="status">En attente…</div>
+  <div id="big"></div>
+  <pre id="log"></pre>
+</main>
+<script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
+<script>
+(function () {
+  var ID = 'miroir-tesla-test-7731';
+  var logEl = document.getElementById('log');
+  var st = document.getElementById('status');
+  var big = document.getElementById('big');
+  function log(m) { logEl.textContent = new Date().toLocaleTimeString() + '  ' + m + '\n' + logEl.textContent; }
+  function status(t, c) { st.textContent = t; st.style.color = c || 'var(--txt)'; }
+  var cfg = { config: { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] } };
+
+  async function describe(conn) {
+    try {
+      var stats = await conn.peerConnection.getStats();
+      var pair, local = {}, remote = {};
+      stats.forEach(function (s) {
+        if (s.type === 'candidate-pair' && (s.nominated || s.selected) && s.state === 'succeeded') pair = s;
+        if (s.type === 'local-candidate') local[s.id] = s;
+        if (s.type === 'remote-candidate') remote[s.id] = s;
+      });
+      if (!pair) return 'chemin inconnu';
+      var l = local[pair.localCandidateId] || {}, r = remote[pair.remoteCandidateId] || {};
+      return 'Chemin : ' + (l.candidateType || '?') + ' ' + (l.address || l.ip || '') + '  →  ' +
+             (r.candidateType || '?') + ' ' + (r.address || r.ip || '') + ' (' + (l.protocol || '') + ')' +
+             '\nRTT mesuré par WebRTC : ' + (pair.currentRoundTripTime != null ? Math.round(pair.currentRoundTripTime * 1000) + ' ms' : '?');
+    } catch (e) { return 'stats indisponibles'; }
+  }
+
+  function wire(conn, role) {
+    conn.on('open', async function () {
+      status('✅ CONNECTÉ !', 'var(--ok)');
+      log('Canal ouvert (' + role + ')');
+      setTimeout(async function () { log(await describe(conn)); }, 1500);
+      if (role === 'car') {
+        setInterval(function () { conn.send({ t: 'ping', at: performance.now() }); }, 1000);
+      }
+    });
+    conn.on('data', function (d) {
+      if (d.t === 'ping') conn.send({ t: 'pong', at: d.at });
+      if (d.t === 'pong') big.textContent = 'Aller-retour téléphone ↔ Tesla : ' + Math.round(performance.now() - d.at) + ' ms';
+    });
+    conn.on('close', function () { status('Connexion fermée', 'var(--bad)'); log('fermé'); });
+    conn.on('error', function (e) { log('erreur canal : ' + e); });
+    if (conn.peerConnection) {
+      conn.peerConnection.addEventListener('iceconnectionstatechange', function () {
+        log('ICE : ' + conn.peerConnection.iceConnectionState);
+        if (conn.peerConnection.iceConnectionState === 'failed') status('❌ Connexion directe bloquée', 'var(--bad)');
+      });
+    }
+  }
+
+  document.getElementById('bPhone').onclick = async function () {
+    status('Téléphone : préparation…', 'var(--warn)');
+    // Autoriser le micro permet au navigateur du téléphone de donner sa vraie adresse locale
+    try { var s = await navigator.mediaDevices.getUserMedia({ audio: true }); s.getTracks().forEach(function (t) { t.stop(); }); log('Micro autorisé (adresse locale visible)'); }
+    catch (e) { log('Micro refusé : la connexion peut quand même marcher'); }
+    var peer = new Peer(ID, cfg);
+    peer.on('open', function () { status('📱 Prêt. Appuyez maintenant sur « TESLA » dans la voiture.', 'var(--warn)'); log('Téléphone enregistré'); });
+    peer.on('connection', function (c) { log('La Tesla arrive…'); wire(c, 'phone'); });
+    peer.on('error', function (e) { log('Erreur : ' + e.type + ' ' + e); if (e.type === 'unavailable-id') status('Déjà ouvert ailleurs : rechargez la page', 'var(--bad)'); });
+  };
+
+  document.getElementById('bCar').onclick = function () {
+    status('Tesla : connexion au téléphone…', 'var(--warn)');
+    var peer = new Peer(cfg);
+    peer.on('open', function () {
+      log('Tesla enregistrée, appel du téléphone');
+      var c = peer.connect(ID, { reliable: true });
+      wire(c, 'car');
+      setTimeout(function () { if (!c.open) { status('❌ Pas de connexion après 20 s', 'var(--bad)'); } }, 20000);
+    });
+    peer.on('error', function (e) { log('Erreur : ' + e.type + ' ' + e); if (e.type === 'peer-unavailable') status('Le téléphone n\'est pas prêt : appuyez d\'abord sur TÉLÉPHONE', 'var(--bad)'); });
+  };
+  log('Page chargée. WebRTC disponible : ' + (!!window.RTCPeerConnection));
+})();
+</script>
+</body>
+</html>
